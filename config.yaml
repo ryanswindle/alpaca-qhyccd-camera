@@ -1,0 +1,17 @@
+entity: qhyccd_camera
+library: /usr/local/lib/libqhyccd.so
+server:
+  host: 0.0.0.0
+  port: 5900
+log_level: INFO
+devices:
+  - entity: QHY600M_1
+    device_number: 0
+    serial_number: 954e9347bc645f17e
+    defaults:
+      temperature: -10
+      readout_mode: 0
+      binning: 1
+      gain: 0
+      offset: 0
+      usb_traffic: 10

@@ -132,7 +132,8 @@ python test.py
 ```bash
 docker build -t alpaca-qhyccd-camera .
 docker run -d --name alpaca-qhyccd-camera \
-    -privileged -v /dev/bus/usb:/dev/bus/usb \
+    -v ./config.yaml:/alpyca/config.yaml:ro \
+    --privileged -v /dev/bus/usb:/dev/bus/usb \
     -v /usr/local/lib/libqhyccd.so:/usr/local/lib/libqhyccd.so:ro \
     -v /usr/local/lib/libqhyccd.so.20:/usr/local/lib/libqhyccd.so.20:ro \
     -v /usr/local/lib/libqhyccd.so.25.9.29.10:/usr/local/lib/libqhyccd.so.25.9.29.10:ro \

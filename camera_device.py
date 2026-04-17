@@ -507,6 +507,10 @@ class CameraDevice:
         except Exception as e:
             logger.error(f"Disconnect error: {e}")
 
+    @property
+    def entity(self) -> str:
+        return self._config.entity
+
     ######################
     # ICamera properties #
     ######################

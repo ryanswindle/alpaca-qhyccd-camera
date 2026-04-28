@@ -390,7 +390,6 @@ async def cooleron_get(devnum: int, params: AlpacaGetParams = Depends()):
 async def cooleron_put(devnum: int, CoolerOn: Annotated[str, Form()], params: AlpacaPutParams = Depends()):
     return MethodResponse.create(
         client_transaction_id=params.client_transaction_id,
-        error=NotImplementedException("CoolerOn"),
     ).model_dump()
 
 

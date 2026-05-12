@@ -1,4 +1,5 @@
 from ctypes import (
+    addressof,
     byref,
     c_double,
     c_uint8,
@@ -699,17 +700,11 @@ class CameraDevice:
             self._camera_state = CameraState.ERROR
             raise RuntimeError("GetQHYCCDSingleFrame failed")
 
-        img = (
-            np.frombuffer(
-                data, dtype=np.uint16, offset=0, count=img_w.value * img_h.value
-            )
-            .reshape(img_h.value, img_w.value)
-            .copy()
-        )
-
-        # Parse GPS timing information
+        # Parse GPS timing information from the raw row-major buffer before
+        # we reshape/transpose for ASCOM convention — the GPS struct lives in
+        # the first pixels of the buffer and depends on native byte order.
         try:
-            gps = QHY_GPS.from_address(img.ctypes.data)
+            gps = QHY_GPS.from_address(addressof(data))
             vsync_status = gps.create_status(gps.NowFlag)
             if vsync_status in ["LOCKED", "LOCKING"] and has_precise_info:
                 end_seconds = (
@@ -746,10 +741,20 @@ class CameraDevice:
             logger.warning(f"GPS parsing failed: {e}, using system clock")
             self._use_system_clock_timing()
 
+        # Build the ASCOM-shaped image: native buffer is row-major (H, W);
+        # ASCOM ImageArray indexes as [x, y] so we transpose to (W, H).
+        img = (
+            np.frombuffer(
+                data, dtype=np.uint16, offset=0, count=img_w.value * img_h.value
+            )
+            .reshape(img_h.value, img_w.value)
+            .T.copy()
+        )
+
         self._camera_state = CameraState.IDLE
         self._image_ready = False
 
-        logger.debug(f"Image: {img.shape[1]}x{img.shape[0]}, dtype={img.dtype}")
+        logger.debug(f"Image: {img.shape[0]}x{img.shape[1]}, dtype={img.dtype}")
         return img
 
     def _use_system_clock_timing(self) -> None:

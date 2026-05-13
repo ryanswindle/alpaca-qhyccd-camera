@@ -143,7 +143,7 @@ class ImageArrayResponse(PropertyResponse):
                 )
                 value = value.astype(np.uint16, order="C")
 
-            image_bytes = value.astype(value.dtype, order="C").tobytes(order="C")
+            image_bytes = np.ascontiguousarray(value).tobytes(order="C")
             return struct.pack(
                 f"{IMAGEBYTES_HEADER_FORMAT}{len(image_bytes)}s",
                 1,  # MetadataVersion

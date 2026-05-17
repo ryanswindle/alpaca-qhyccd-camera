@@ -10,7 +10,7 @@ def _load_yaml_configs() -> dict:
     base_config = {}
     override_config = {}
 
-    base_path = Path(__file__).parent / "config.yaml"
+    base_path = Path(__file__).parent.parent / "config.yaml"
     if base_path.exists():
         with open(base_path, "r") as f:
             base_config = yaml.safe_load(f) or {}

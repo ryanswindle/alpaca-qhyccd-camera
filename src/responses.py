@@ -64,9 +64,13 @@ class PropertyResponse(AlpacaResponse):
         client_transaction_id: int = 0,
         error: Optional[AlpacaError] = None,
     ) -> "PropertyResponse":
+        # Pass `value` through regardless of error — callers are responsible
+        # for providing a type-correct default (e.g. [] for array-returning
+        # methods like DeviceState). ConformU's strictly-typed deserializer
+        # rejects null where it expects an array.
         err = error or Success()
         return cls(
-            Value=value if err.Number == 0 else None,
+            Value=value,
             ClientTransactionID=client_transaction_id,
             ServerTransactionID=get_next_transaction_id(),
             ErrorNumber=err.Number,

@@ -624,13 +624,9 @@ async def imagearray(devnum: int, params: AlpacaGetParams = Depends(), accept: O
 
 
 @router.get("/{devnum}/imagearrayvariant", summary="")
-async def imagearrayvariant(devnum: int, params: AlpacaGetParams = Depends()):
-    get_device(devnum)
-    return PropertyResponse.create(
-        value=None,
-        client_transaction_id=params.client_transaction_id,
-        error=NotImplementedException("ImageArrayVariant"),
-    ).model_dump()
+async def imagearrayvariant(devnum: int, params: AlpacaGetParams = Depends(), accept: Optional[str] = Header(None)):
+    # ASCOM spec: ImageArrayVariant is identical to ImageArray for Alpaca JSON transport
+    return await imagearray(devnum, params, accept)
 
 
 @router.get("/{devnum}/imageready", summary="")
@@ -850,7 +846,16 @@ async def sensorname(devnum: int, params: AlpacaGetParams = Depends()):
 @router.get("/{devnum}/sensortype", summary="")
 async def sensortype(devnum: int, params: AlpacaGetParams = Depends()):
     device = get_device(devnum)
-    return _connected_property(device, int(device.sensor_type), params)
+    if not device.connected:
+        return PropertyResponse.create(
+            value=None,
+            client_transaction_id=params.client_transaction_id,
+            error=NotConnectedException(),
+        ).model_dump()
+    return PropertyResponse.create(
+        value=int(device.sensor_type),
+        client_transaction_id=params.client_transaction_id,
+    ).model_dump()
 
 
 @router.get("/{devnum}/setccdtemperature", summary="")

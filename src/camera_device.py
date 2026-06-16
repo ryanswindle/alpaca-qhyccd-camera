@@ -59,6 +59,7 @@ class CameraDevice:
 
         self._camera_state = CameraState.IDLE
         self._image_ready = False
+        self._cached_image: Optional[np.ndarray] = None
         self._exposure_complete = Event()
         self._readout_complete = Event()
 
@@ -487,6 +488,13 @@ class CameraDevice:
     def connected(self, value: bool) -> None:
         if value and not self._connected:
             self.connect()
+            # Block until the connection attempt completes so that
+            # GET /connected returns True immediately after PUT returns,
+            # as required by the ASCOM Alpaca spec (ConformU checks this).
+            if self._connect_thread is not None:
+                self._connect_thread.join()
+                if not self._connected:
+                    raise RuntimeError("Camera connection failed")
         elif not value and self._connected:
             self.disconnect()
 
@@ -504,6 +512,19 @@ class CameraDevice:
                 self.libqhyccd.CloseQHYCCD(self.handle)
             self._connected = False
             self._camera_state = CameraState.IDLE
+            # Reset all session state so reconnect starts fresh
+            self._image_ready = False
+            self._cached_image = None
+            self._last_exposure_duration = None
+            self._last_exposure_start_time = None
+            self._timing = {}
+            self._bin_x = 1
+            self._bin_y = 1
+            self._start_x = 0
+            self._start_y = 0
+            self._num_x = 0
+            self._num_y = 0
+            self.handle = None
             logger.info(f"Disconnected from camera {self._config.entity}")
         except Exception as e:
             logger.error(f"Disconnect error: {e}")
@@ -521,7 +542,10 @@ class CameraDevice:
 
     @bin_x.setter
     def bin_x(self, value: int) -> None:
-        self._set_roi(bin_x=value, bin_y=value)
+        if value < 1 or value > self._max_bin_x:
+            raise ValueError(f"BinX {value} not in range 1-{self._max_bin_x}")
+        if value != self._bin_x:
+            self._set_roi(bin_x=value, bin_y=value)
 
     @property
     def bin_y(self) -> int:
@@ -529,7 +553,10 @@ class CameraDevice:
 
     @bin_y.setter
     def bin_y(self, value: int) -> None:
-        self._set_roi(bin_x=value, bin_y=value)
+        if value < 1 or value > self._max_bin_y:
+            raise ValueError(f"BinX {value} not in range 1-{self._max_bin_y}")
+        if value != self._bin_y:
+            self._set_roi(bin_x=value, bin_y=value)
 
     @property
     def camera_state(self) -> CameraState:
@@ -632,6 +659,11 @@ class CameraDevice:
         """Returns a 2D numpy array of the last captured image."""
         if not self._image_ready:
             raise RuntimeError("No image ready")
+
+        # Return cached image if already read (ASCOM spec: image stays available
+        # until the next exposure starts)
+        if self._cached_image is not None:
+            return self._cached_image
 
         self._camera_state = CameraState.DOWNLOADING
 
@@ -743,16 +775,17 @@ class CameraDevice:
 
         # Build the ASCOM-shaped image: native buffer is row-major (H, W);
         # ASCOM ImageArray indexes as [x, y] so we transpose to (W, H).
+        # ASCOM spec requires ImageArray to return Int32 values.
         img = (
             np.frombuffer(
                 data, dtype=np.uint16, offset=0, count=img_w.value * img_h.value
             )
             .reshape(img_h.value, img_w.value)
-            .T.copy()
+            .T.astype(np.int32)
         )
 
         self._camera_state = CameraState.IDLE
-        self._image_ready = False
+        self._cached_image = img
 
         logger.debug(f"Image: {img.shape[0]}x{img.shape[1]}, dtype={img.dtype}")
         return img
@@ -776,10 +809,14 @@ class CameraDevice:
 
     @property
     def last_exposure_duration(self) -> float:
+        if self._last_exposure_duration is None:
+            raise RuntimeError("No exposure has been made")
         return self._last_exposure_duration
 
     @property
     def last_exposure_start_time(self) -> str:
+        if self._last_exposure_start_time is None:
+            raise RuntimeError("No exposure has been made")
         return self._last_exposure_start_time
 
     @property
@@ -800,7 +837,9 @@ class CameraDevice:
 
     @num_x.setter
     def num_x(self, value: int) -> None:
-        self._set_roi(num_x=value)
+        if value < 1:
+            raise ValueError(f"NumX {value} must be >= 1")
+        self._num_x = value
 
     @property
     def num_y(self) -> int:
@@ -808,7 +847,9 @@ class CameraDevice:
 
     @num_y.setter
     def num_y(self, value: int) -> None:
-        self._set_roi(num_y=value)
+        if value < 1:
+            raise ValueError(f"NumY {value} must be >= 1")
+        self._num_y = value
 
     @property
     def offset(self) -> int:
@@ -876,6 +917,15 @@ class CameraDevice:
 
     @set_ccd_temperature.setter
     def set_ccd_temperature(self, value: float) -> None:
+        # ASCOM spec: reject values below absolute zero or unreasonably high
+        if value < -273.15:
+            raise ValueError(
+                f"SetCCDTemperature {value} is below absolute zero (-273.15°C)"
+            )
+        if value > 50.0:
+            raise ValueError(
+                f"SetCCDTemperature {value} exceeds maximum allowed (50°C)"
+            )
         res = self.libqhyccd.SetQHYCCDParam(
             self.handle, QHY_CONTROL.COOLER, c_double(value)
         )
@@ -890,7 +940,9 @@ class CameraDevice:
 
     @start_x.setter
     def start_x(self, value: int) -> None:
-        self._set_roi(start_x=value)
+        if value < 0:
+            raise ValueError(f"StartX {value} must be >= 0")
+        self._start_x = value
 
     @property
     def start_y(self) -> int:
@@ -898,7 +950,9 @@ class CameraDevice:
 
     @start_y.setter
     def start_y(self, value: int) -> None:
-        self._set_roi(start_y=value)
+        if value < 0:
+            raise ValueError(f"StartY {value} must be >= 0")
+        self._start_y = value
 
     @property
     def timestamp(self) -> str:
@@ -971,28 +1025,28 @@ class CameraDevice:
         max_binned_x = self._camera_x_size // bx
         max_binned_y = self._camera_y_size // by
 
-        # Validate and clamp start values
-        if sx < 0:
-            sx = 0
-        if sy < 0:
-            sy = 0
-        if sx >= max_binned_x:
-            sx = max_binned_x - 1
-        if sy >= max_binned_y:
-            sy = max_binned_y - 1
+        # Validate start values
+        if sx < 0 or sx >= max_binned_x:
+            raise ValueError(
+                f"StartX {sx} not in range 0-{max_binned_x - 1}"
+            )
+        if sy < 0 or sy >= max_binned_y:
+            raise ValueError(
+                f"StartY {sy} not in range 0-{max_binned_y - 1}"
+            )
 
-        # Validate and clamp num values to fit within remaining space
+        # Validate num values
         max_nx = max_binned_x - sx
         max_ny = max_binned_y - sy
 
-        if nx < 1:
-            nx = 1
-        if ny < 1:
-            ny = 1
-        if nx > max_nx:
-            nx = max_nx
-        if ny > max_ny:
-            ny = max_ny
+        if nx < 1 or nx > max_nx:
+            raise ValueError(
+                f"NumX {nx} not in range 1-{max_nx} (with StartX={sx}, binned width={max_binned_x})"
+            )
+        if ny < 1 or ny > max_ny:
+            raise ValueError(
+                f"NumY {ny} not in range 1-{max_ny} (with StartY={sy}, binned height={max_binned_y})"
+            )
 
         # Apply resolution to hardware
         res = self.libqhyccd.SetQHYCCDResolution(
@@ -1014,6 +1068,40 @@ class CameraDevice:
         if self._camera_state != CameraState.IDLE:
             raise RuntimeError("Camera is not idle")
 
+        if duration < 0:
+            raise ValueError(
+                f"Duration {duration} is invalid, must be >= 0"
+            )
+
+        # Validate ROI fits within binned chip dimensions
+        max_binned_x = self._camera_x_size // self._bin_x
+        max_binned_y = self._camera_y_size // self._bin_y
+
+        if self._start_x >= max_binned_x:
+            raise ValueError(
+                f"StartX ({self._start_x}) is outside binned chip width ({max_binned_x})"
+            )
+        if self._start_y >= max_binned_y:
+            raise ValueError(
+                f"StartY ({self._start_y}) is outside binned chip height ({max_binned_y})"
+            )
+        if self._start_x + self._num_x > max_binned_x:
+            raise ValueError(
+                f"StartX ({self._start_x}) + NumX ({self._num_x}) = "
+                f"{self._start_x + self._num_x} exceeds binned width {max_binned_x}"
+            )
+        if self._start_y + self._num_y > max_binned_y:
+            raise ValueError(
+                f"StartY ({self._start_y}) + NumY ({self._num_y}) = "
+                f"{self._start_y + self._num_y} exceeds binned height {max_binned_y}"
+            )
+
+        # Apply validated ROI to hardware
+        self._set_roi(
+            start_x=self._start_x, start_y=self._start_y,
+            num_x=self._num_x, num_y=self._num_y,
+        )
+
         # Set the exposure time (library uses microseconds)
         res = self.libqhyccd.SetQHYCCDParam(
             self.handle, QHY_CONTROL.EXPOSURE, c_double(duration * 1e6)
@@ -1022,12 +1110,16 @@ class CameraDevice:
             raise RuntimeError("SetQHYCCDParam(EXPOSURE) failed")
 
         # Start the exposure
+        # Note: ExpQHYCCDSingleFrame returns QHY_ERROR (0xFFFFFFFF) on actual
+        # failure but may return other non-zero values as a "pending" status
+        # on some cameras (e.g. QHY174GPS). Only treat QHY_ERROR as fatal.
         res = self.libqhyccd.ExpQHYCCDSingleFrame(self.handle)
-        if res != QHY_SUCCESS:
+        if res == QHY_ERROR:
             raise RuntimeError("ExpQHYCCDSingleFrame failed")
 
         self._camera_state = CameraState.EXPOSING
         self._image_ready = False
+        self._cached_image = None
 
         # Record start time (may be overwritten by GPS metadata)
         self._last_exposure_duration = duration
@@ -1057,8 +1149,8 @@ class CameraDevice:
     def _wait_for_image(self) -> None:
         """Wait for readout to complete, then mark image as ready."""
         self._readout_complete.wait()
-        self._camera_state = CameraState.DOWNLOADING
         self._image_ready = True
+        self._camera_state = CameraState.IDLE
 
     def abort_exposure(self) -> None:
         if self._camera_state in (

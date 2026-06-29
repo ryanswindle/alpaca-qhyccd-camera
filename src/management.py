@@ -30,11 +30,14 @@ class ServerMetadata:
 
 
 devices: Dict[int, object] = {}
+cfw_devices: Dict[int, object] = {}
 
 
-def set_devices(dev_dict):
-    global devices
+def set_devices(dev_dict, cfw_dict=None):
+    global devices, cfw_devices
     devices = dev_dict
+    if cfw_dict is not None:
+        cfw_devices = cfw_dict
 
 
 @router.get("/apiversions", summary="")
@@ -55,7 +58,7 @@ async def server_description():
 
 @router.get("/v1/configureddevices", summary="")
 async def configured_devices():
-    device = [
+    result = [
         ConfiguredDevice(
             DeviceName=dev.entity,
             DeviceType="Camera",
@@ -63,4 +66,12 @@ async def configured_devices():
         ).model_dump()
         for num, dev in devices.items()
     ]
-    return PropertyResponse.create(value=device, client_transaction_id=0).model_dump()
+    result.extend(
+        ConfiguredDevice(
+            DeviceName=dev.entity,
+            DeviceType="FilterWheel",
+            DeviceNumber=num,
+        ).model_dump()
+        for num, dev in cfw_devices.items()
+    )
+    return PropertyResponse.create(value=result, client_transaction_id=0).model_dump()

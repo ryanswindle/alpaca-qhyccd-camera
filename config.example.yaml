@@ -1,0 +1,41 @@
+entity: qhyccd_camera
+library: /usr/local/lib/libqhyccd.so
+server:
+  host: 0.0.0.0
+  port: 5900
+log_level: INFO
+devices:
+  - entity: QHY600M
+    device_number: 0
+    serial_number: ""  # Leave empty to use first camera found
+    defaults:
+      temperature: -10
+      readout_mode: 0
+      binning: 1
+      gain: 0
+      offset: 0
+      usb_traffic: 10
+
+# Optional: filter wheel connected to camera via 4-pin CFW cable.
+# Controlled through the camera's SDK handle (not a serial port).
+# The camera must be connected before the filter wheel.
+# Remove or comment out this section to disable filter wheel support.
+#
+# filter_wheel:
+#   entity: QHYFilterWheel
+#   device_number: 0
+#   names:
+#     - Sloan-u
+#     - Sloan-g
+#     - Sloan-r
+#     - Sloan-i
+#     - Sloan-z
+#     - Luminance
+#   focus_offsets:
+#     - 0
+#     - 0
+#     - 0
+#     - 0
+#     - 0
+#     - 0
+#   timeout: 60

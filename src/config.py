@@ -41,10 +41,25 @@ class DeviceDefaults(BaseModel):
     usb_traffic: float = Field(default=10.0)
 
 
+class CFWConfig(BaseModel):
+    """Optional filter wheel configuration (CFW connected via 4-pin cable)."""
+    entity: str = Field(default="FilterWheel")
+    device_number: int = Field(default=0)
+    names: List[str] = Field(default_factory=list)
+    focus_offsets: List[int] = Field(default_factory=list)
+    timeout: float = Field(default=60.0)
+
+
 class DeviceConfig(BaseModel):
     entity: str = Field(default="Camera")
     device_number: int = Field(default=0)
     serial_number: str = Field(default="")
+    sensor_bpp: int = Field(
+        default=16,
+        description="Native ADC bit depth of the sensor (e.g. 12 for QHY174GPS, "
+        "14 for QHY268C, 16 for QHY600). The SDK always delivers 16-bit data; "
+        "pixels are right-shifted by (16 - sensor_bpp) to produce true ADU values.",
+    )
     defaults: DeviceDefaults = Field(default_factory=DeviceDefaults)
 
 
@@ -59,6 +74,7 @@ class Config(BaseModel):
     server: ServerConfig = Field(default_factory=ServerConfig)
     log_level: str = Field(default="INFO")
     devices: List[DeviceConfig] = Field(default_factory=list)
+    filter_wheel: Optional[CFWConfig] = Field(default=None)
 
     @classmethod
     def load(cls) -> "Config":

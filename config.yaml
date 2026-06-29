@@ -5,13 +5,31 @@ server:
   port: 5900
 log_level: INFO
 devices:
-  - entity: QHY600M_1
+  - entity: QHY174GPS
     device_number: 0
-    serial_number: 954e9347bc645f17e
+    sensor_bpp: 12  # native ADC bit depth; pixels are right-shifted from 16-bit to true ADU
     defaults:
-      temperature: -10
+      temperature: -50
       readout_mode: 0
       binning: 1
       gain: 0
       offset: 0
       usb_traffic: 10
+filter_wheel:
+  entity: QHYFilterWheel
+  device_number: 0
+  names:
+    - Sloan-u
+    - Sloan-g
+    - Sloan-r
+    - Sloan-i
+    - Sloan-z
+    - Luminance
+  focus_offsets:
+    - 0
+    - 0
+    - 0
+    - 0
+    - 0
+    - 0
+  timeout: 60

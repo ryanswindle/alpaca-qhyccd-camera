@@ -141,7 +141,9 @@ async def connected_get(devnum: int, params: AlpacaGetParams = Depends()):
 
 
 @router.put("/{devnum}/connected", summary="")
-async def connected_put(devnum: int, params: AlpacaPutParams = Depends(alpaca_put_params)):
+def connected_put(devnum: int, params: AlpacaPutParams = Depends(alpaca_put_params)):
+    # Sync endpoint (threadpool): Connected Set blocks until the connect
+    # attempt completes and must not stall the event loop.
     device = get_device(devnum)
     value = params.get("Connected")
     if value is None:
@@ -587,16 +589,20 @@ async def heatsinktemperature(devnum: int, params: AlpacaGetParams = Depends()):
 
 
 @router.get("/{devnum}/imagearray", summary="")
-async def imagearray(devnum: int, params: AlpacaGetParams = Depends(), accept: Optional[str] = Header(None)):
+def imagearray(devnum: int, params: AlpacaGetParams = Depends(), accept: Optional[str] = Header(None)):
+    # Sync endpoint (threadpool): large-frame assembly and serialization
+    # must not stall the event loop.
+    # All ImageArray responses — including errors — use ImageArrayResponse
+    # so the spec-required Type and Rank JSON fields are always present.
     device = get_device(devnum)
     if not device.connected:
-        return PropertyResponse.create(
+        return ImageArrayResponse.create(
             value=None,
             client_transaction_id=params.client_transaction_id,
             error=NotConnectedException(),
         ).model_dump()
     if not device.image_ready:
-        return PropertyResponse.create(
+        return ImageArrayResponse.create(
             value=None,
             client_transaction_id=params.client_transaction_id,
             error=InvalidOperationException("Image not ready"),
@@ -616,7 +622,7 @@ async def imagearray(devnum: int, params: AlpacaGetParams = Depends(), accept: O
         response_data["Value"] = img.tolist()
         return JSONResponse(content=response_data)
     except Exception as ex:
-        return PropertyResponse.create(
+        return ImageArrayResponse.create(
             value=None,
             client_transaction_id=params.client_transaction_id,
             error=DriverException(0x500, "Camera.ImageArray failed", ex),
@@ -624,13 +630,10 @@ async def imagearray(devnum: int, params: AlpacaGetParams = Depends(), accept: O
 
 
 @router.get("/{devnum}/imagearrayvariant", summary="")
-async def imagearrayvariant(devnum: int, params: AlpacaGetParams = Depends()):
-    get_device(devnum)
-    return PropertyResponse.create(
-        value=None,
-        client_transaction_id=params.client_transaction_id,
-        error=NotImplementedException("ImageArrayVariant"),
-    ).model_dump()
+def imagearrayvariant(devnum: int, params: AlpacaGetParams = Depends(), accept: Optional[str] = Header(None)):
+    # ImageArrayVariant is mandatory in ICameraV4 and carries the same data
+    # as ImageArray over Alpaca.
+    return imagearray(devnum, params=params, accept=accept)
 
 
 @router.get("/{devnum}/imageready", summary="")
@@ -652,12 +655,24 @@ async def ispulseguiding(devnum: int, params: AlpacaGetParams = Depends()):
 @router.get("/{devnum}/lastexposureduration", summary="")
 async def lastexposureduration(devnum: int, params: AlpacaGetParams = Depends()):
     device = get_device(devnum)
+    if device.connected and device.last_exposure_duration is None:
+        return PropertyResponse.create(
+            value=None,
+            client_transaction_id=params.client_transaction_id,
+            error=InvalidOperationException("No exposure has been taken"),
+        ).model_dump()
     return _connected_property(device, "last_exposure_duration", params)
 
 
 @router.get("/{devnum}/lastexposurestarttime", summary="")
 async def lastexposurestarttime(devnum: int, params: AlpacaGetParams = Depends()):
     device = get_device(devnum)
+    if device.connected and device.last_exposure_start_time is None:
+        return PropertyResponse.create(
+            value=None,
+            client_transaction_id=params.client_transaction_id,
+            error=InvalidOperationException("No exposure has been taken"),
+        ).model_dump()
     return _connected_property(device, "last_exposure_start_time", params)
 
 
@@ -688,6 +703,11 @@ async def numx_get(devnum: int, params: AlpacaGetParams = Depends()):
 @router.put("/{devnum}/numx", summary="")
 async def numx_put(devnum: int, NumX: Annotated[str, Form()], params: AlpacaPutParams = Depends(alpaca_put_params)):
     device = get_device(devnum)
+    # Validate NumX *before* the connected check so bad values yield 400.
+    try:
+        int(NumX)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"NumX must be an integer, got {NumX!r}")
     if not device.connected:
         return MethodResponse.create(
             client_transaction_id=params.client_transaction_id,
@@ -714,6 +734,11 @@ async def numy_get(devnum: int, params: AlpacaGetParams = Depends()):
 @router.put("/{devnum}/numy", summary="")
 async def numy_put(devnum: int, NumY: Annotated[str, Form()], params: AlpacaPutParams = Depends(alpaca_put_params)):
     device = get_device(devnum)
+    # Validate NumY *before* the connected check so bad values yield 400.
+    try:
+        int(NumY)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"NumY must be an integer, got {NumY!r}")
     if not device.connected:
         return MethodResponse.create(
             client_transaction_id=params.client_transaction_id,
@@ -740,13 +765,17 @@ async def offset_get(devnum: int, params: AlpacaGetParams = Depends()):
 @router.put("/{devnum}/offset", summary="")
 async def offset_put(devnum: int, Offset: Annotated[str, Form()], params: AlpacaPutParams = Depends(alpaca_put_params)):
     device = get_device(devnum)
+    # Validate Offset *before* the connected check so bad values yield 400.
+    try:
+        val = int(Offset)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Offset must be an integer, got {Offset!r}")
     if not device.connected:
         return MethodResponse.create(
             client_transaction_id=params.client_transaction_id,
             error=NotConnectedException(),
         ).model_dump()
     try:
-        val = int(Offset)
         if val < device.offset_min or val > device.offset_max:
             return MethodResponse.create(
                 client_transaction_id=params.client_transaction_id,
@@ -818,6 +847,11 @@ async def readoutmode_get(devnum: int, params: AlpacaGetParams = Depends()):
 @router.put("/{devnum}/readoutmode", summary="")
 async def readoutmode_put(devnum: int, ReadoutMode: Annotated[str, Form()], params: AlpacaPutParams = Depends(alpaca_put_params)):
     device = get_device(devnum)
+    # Validate ReadoutMode *before* the connected check so bad values yield 400.
+    try:
+        int(ReadoutMode)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"ReadoutMode must be an integer, got {ReadoutMode!r}")
     if not device.connected:
         return MethodResponse.create(
             client_transaction_id=params.client_transaction_id,
@@ -850,7 +884,7 @@ async def sensorname(devnum: int, params: AlpacaGetParams = Depends()):
 @router.get("/{devnum}/sensortype", summary="")
 async def sensortype(devnum: int, params: AlpacaGetParams = Depends()):
     device = get_device(devnum)
-    return _connected_property(device, int(device.sensor_type), params)
+    return _connected_property(device, "sensor_type", params)
 
 
 @router.get("/{devnum}/setccdtemperature", summary="")
@@ -862,6 +896,11 @@ async def setccdtemperature_get(devnum: int, params: AlpacaGetParams = Depends()
 @router.put("/{devnum}/setccdtemperature", summary="")
 async def setccdtemperature_put(devnum: int, SetCCDTemperature: Annotated[str, Form()], params: AlpacaPutParams = Depends(alpaca_put_params)):
     device = get_device(devnum)
+    # Validate SetCCDTemperature *before* the connected check so bad values yield 400.
+    try:
+        float(SetCCDTemperature)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"SetCCDTemperature must be a number, got {SetCCDTemperature!r}")
     if not device.connected:
         return MethodResponse.create(
             client_transaction_id=params.client_transaction_id,
@@ -888,6 +927,11 @@ async def startx_get(devnum: int, params: AlpacaGetParams = Depends()):
 @router.put("/{devnum}/startx", summary="")
 async def startx_put(devnum: int, StartX: Annotated[str, Form()], params: AlpacaPutParams = Depends(alpaca_put_params)):
     device = get_device(devnum)
+    # Validate StartX *before* the connected check so bad values yield 400.
+    try:
+        int(StartX)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"StartX must be an integer, got {StartX!r}")
     if not device.connected:
         return MethodResponse.create(
             client_transaction_id=params.client_transaction_id,
@@ -914,6 +958,11 @@ async def starty_get(devnum: int, params: AlpacaGetParams = Depends()):
 @router.put("/{devnum}/starty", summary="")
 async def starty_put(devnum: int, StartY: Annotated[str, Form()],params: AlpacaPutParams = Depends(alpaca_put_params)):
     device = get_device(devnum)
+    # Validate StartY *before* the connected check so bad values yield 400.
+    try:
+        int(StartY)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"StartY must be an integer, got {StartY!r}")
     if not device.connected:
         return MethodResponse.create(
             client_transaction_id=params.client_transaction_id,
@@ -976,6 +1025,12 @@ async def abortexposure(devnum: int, params: AlpacaPutParams = Depends(alpaca_pu
 @router.put("/{devnum}/pulseguide", summary="")
 async def pulseguide(devnum: int, Direction: Annotated[str, Form()], Duration: Annotated[str, Form()], params: AlpacaPutParams = Depends(alpaca_put_params)):
     get_device(devnum)
+    # Validate Direction/Duration *before* the connected check so bad values yield 400.
+    try:
+        int(Direction)
+        int(Duration)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Direction/Duration must be integers, got {Direction!r}/{Duration!r}")
     return MethodResponse.create(
         client_transaction_id=params.client_transaction_id,
         error=NotImplementedException("PulseGuide"),
@@ -985,6 +1040,12 @@ async def pulseguide(devnum: int, Direction: Annotated[str, Form()], Duration: A
 @router.put("/{devnum}/startexposure", summary="")
 async def startexposure(devnum: int, Duration: Annotated[str, Form()], Light: Annotated[str, Form()], params: AlpacaPutParams = Depends(alpaca_put_params)):
     device = get_device(devnum)
+    # Validate Duration/Light *before* the connected check so bad values yield 400.
+    try:
+        float(Duration)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Duration must be a number, got {Duration!r}")
+    to_bool(Light)
     if not device.connected:
         return MethodResponse.create(
             client_transaction_id=params.client_transaction_id,

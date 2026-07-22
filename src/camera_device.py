@@ -56,6 +56,7 @@ class CameraDevice:
         self._connected = False
         self._connecting = False
         self._connect_thread: Optional[Thread] = None
+        self._disconnect_thread: Optional[Thread] = None
 
         self._camera_state = CameraState.IDLE
         self._image_ready = False
@@ -200,6 +201,10 @@ class CameraDevice:
             self._connected = True
             self._camera_state = CameraState.IDLE
             self._image_ready = False
+            # A fresh connection has taken no exposures — LastExposure* must
+            # error until the first StartExposure of this session.
+            self._last_exposure_duration = None
+            self._last_exposure_start_time = None
             logger.info(f"Connected to camera {self._config.entity}")
 
         except Exception as e:
@@ -474,7 +479,8 @@ class CameraDevice:
         self._num_x = self._camera_x_size
         self._num_y = self._camera_y_size
 
-        # Apply default binning through the unified ROI setter
+        # Set default binning through the unified ROI setter; the hardware
+        # ROI is applied in start_exposure
         self._set_roi(bin_x=defaults.binning, bin_y=defaults.binning)
 
         logger.info(f"Default parameters set for {self._config.entity}")
@@ -485,18 +491,34 @@ class CameraDevice:
 
     @connected.setter
     def connected(self, value: bool) -> None:
+        # Legacy synchronous semantics: Connected Set must not return until
+        # the attempt completes (Connect()/Disconnect() with Connecting are
+        # the asynchronous path).
         if value and not self._connected:
             self.connect()
+            if self._connect_thread is not None:
+                self._connect_thread.join()
+            if not self._connected:
+                raise RuntimeError("Connect failed (see server log)")
         elif not value and self._connected:
             self.disconnect()
+            if self._disconnect_thread is not None:
+                self._disconnect_thread.join()
 
     @property
     def connecting(self) -> bool:
         return self._connecting
 
     def disconnect(self) -> None:
-        if not self._connected:
+        if not self._connected and not self._connecting:
             return
+        # Connecting covers both transitions per the Platform 7 async
+        # pattern; the worker clears it when the teardown completes.
+        self._connecting = True
+        self._disconnect_thread = Thread(target=self._disconnect_worker, daemon=True)
+        self._disconnect_thread.start()
+
+    def _disconnect_worker(self) -> None:
         try:
             if self._camera_state in (CameraState.EXPOSING, CameraState.READING):
                 self.abort_exposure()
@@ -507,6 +529,8 @@ class CameraDevice:
             logger.info(f"Disconnected from camera {self._config.entity}")
         except Exception as e:
             logger.error(f"Disconnect error: {e}")
+        finally:
+            self._connecting = False
 
     @property
     def entity(self) -> str:
@@ -752,8 +776,9 @@ class CameraDevice:
         )
 
         self._camera_state = CameraState.IDLE
-        self._image_ready = False
 
+        # ImageReady stays true until the next StartExposure — clients may
+        # fetch the image more than once (ImageArray then ImageArrayVariant).
         logger.debug(f"Image: {img.shape[0]}x{img.shape[1]}, dtype={img.dtype}")
         return img
 
@@ -928,9 +953,12 @@ class CameraDevice:
         self, start_x=None, num_x=None, bin_x=None, start_y=None, num_y=None, bin_y=None
     ) -> None:
         """
-        Set ROI with proper validation and ordering.
+        Set ROI, stored as given.
 
-        All start/num values are in binned pixels per ASCOM spec.
+        All start/num values are in binned pixels per ASCOM spec. Binning is
+        validated here; per the ICameraV4 spec the ROI setters accept any
+        value, and validation happens in start_exposure, which must reject an
+        illegal ROI combination and applies the validated ROI to the hardware.
         When binning changes, ROI is reset to full frame at the new binning.
         """
         bx = bin_x if bin_x is not None else self._bin_x
@@ -945,67 +973,22 @@ class CameraDevice:
 
         # When binning changes, reset to full frame at new binning
         if binning_changed:
-            # Apply binning to hardware
-            res = self.libqhyccd.SetQHYCCDBinMode(
-                self.handle, c_uint32(bx), c_uint32(by)
-            )
-            if res != QHY_SUCCESS:
-                raise RuntimeError(f"SetQHYCCDBinMode({bx}, {by}) failed")
             self._bin_x = bx
             self._bin_y = by
+            self._start_x = 0
+            self._start_y = 0
+            self._num_x = self._camera_x_size // bx
+            self._num_y = self._camera_y_size // by
+            return
 
-            # Reset to full frame at new binning
-            max_binned_x = self._camera_x_size // bx
-            max_binned_y = self._camera_y_size // by
-            sx = 0
-            sy = 0
-            nx = max_binned_x
-            ny = max_binned_y
-        else:
-            sx = start_x if start_x is not None else self._start_x
-            sy = start_y if start_y is not None else self._start_y
-            nx = num_x if num_x is not None else self._num_x
-            ny = num_y if num_y is not None else self._num_y
-
-        # Max binned dimensions
-        max_binned_x = self._camera_x_size // bx
-        max_binned_y = self._camera_y_size // by
-
-        # Validate and clamp start values
-        if sx < 0:
-            sx = 0
-        if sy < 0:
-            sy = 0
-        if sx >= max_binned_x:
-            sx = max_binned_x - 1
-        if sy >= max_binned_y:
-            sy = max_binned_y - 1
-
-        # Validate and clamp num values to fit within remaining space
-        max_nx = max_binned_x - sx
-        max_ny = max_binned_y - sy
-
-        if nx < 1:
-            nx = 1
-        if ny < 1:
-            ny = 1
-        if nx > max_nx:
-            nx = max_nx
-        if ny > max_ny:
-            ny = max_ny
-
-        # Apply resolution to hardware
-        res = self.libqhyccd.SetQHYCCDResolution(
-            self.handle, c_uint32(sx), c_uint32(sy), c_uint32(nx), c_uint32(ny)
-        )
-        if res != QHY_SUCCESS:
-            raise RuntimeError(f"SetQHYCCDResolution({sx}, {sy}, {nx}, {ny}) failed")
-
-        # Store values
-        self._start_x = sx
-        self._start_y = sy
-        self._num_x = nx
-        self._num_y = ny
+        if start_x is not None:
+            self._start_x = start_x
+        if start_y is not None:
+            self._start_y = start_y
+        if num_x is not None:
+            self._num_x = num_x
+        if num_y is not None:
+            self._num_y = num_y
 
     ###################
     # ICamera methods #
@@ -1013,6 +996,39 @@ class CameraDevice:
     def start_exposure(self, duration: float, light: bool) -> None:
         if self._camera_state != CameraState.IDLE:
             raise RuntimeError("Camera is not idle")
+        if duration < 0:
+            raise ValueError(f"Duration {duration} must be >= 0")
+        if duration > self._exposure_max:
+            raise ValueError(f"Duration {duration} above ExposureMax {self._exposure_max}")
+        if self._start_x < 0 or self._start_y < 0 or self._num_x < 1 or self._num_y < 1:
+            raise ValueError(
+                f"Invalid ROI: start=({self._start_x}, {self._start_y}) num=({self._num_x}, {self._num_y})"
+            )
+        max_binned_x = self._camera_x_size // self._bin_x
+        max_binned_y = self._camera_y_size // self._bin_y
+        if self._start_x + self._num_x > max_binned_x or self._start_y + self._num_y > max_binned_y:
+            raise ValueError(
+                f"ROI start=({self._start_x}, {self._start_y}) num=({self._num_x}, {self._num_y}) "
+                f"exceeds frame {max_binned_x} x {max_binned_y}"
+            )
+
+        # Apply the validated binning and ROI to the hardware
+        res = self.libqhyccd.SetQHYCCDBinMode(
+            self.handle, c_uint32(self._bin_x), c_uint32(self._bin_y)
+        )
+        if res != QHY_SUCCESS:
+            raise RuntimeError(f"SetQHYCCDBinMode({self._bin_x}, {self._bin_y}) failed")
+        res = self.libqhyccd.SetQHYCCDResolution(
+            self.handle,
+            c_uint32(self._start_x),
+            c_uint32(self._start_y),
+            c_uint32(self._num_x),
+            c_uint32(self._num_y),
+        )
+        if res != QHY_SUCCESS:
+            raise RuntimeError(
+                f"SetQHYCCDResolution({self._start_x}, {self._start_y}, {self._num_x}, {self._num_y}) failed"
+            )
 
         # Set the exposure time (library uses microseconds)
         res = self.libqhyccd.SetQHYCCDParam(
@@ -1057,7 +1073,9 @@ class CameraDevice:
     def _wait_for_image(self) -> None:
         """Wait for readout to complete, then mark image as ready."""
         self._readout_complete.wait()
-        self._camera_state = CameraState.DOWNLOADING
+        # Exposure complete: back to Idle with ImageReady set — DOWNLOADING
+        # is reported by the image_array getter during the actual fetch.
+        self._camera_state = CameraState.IDLE
         self._image_ready = True
 
     def abort_exposure(self) -> None:
